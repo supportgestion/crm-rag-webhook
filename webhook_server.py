@@ -17,10 +17,18 @@ collection = chroma_client.get_or_create_collection(
 )
 
 
+# Helper sécurisé pour extraire le JSON
+async def get_json_payload(request: Request):
+    try:
+        return await request.json()
+    except Exception:
+        return {}
+
+
 # 1. Endpoint : Ingestion depuis Zoho CRM
 @app.post("/zoho-webhook")
 async def recevoir_note_zoho(request: Request):
-    payload = await request.json()
+    payload = await get_json_payload(request)
 
     client_name = payload.get("client", "Client Inconnu")
     date_note = payload.get("date", "2026-08-10")
@@ -28,7 +36,7 @@ async def recevoir_note_zoho(request: Request):
     note_id = payload.get("note_id", f"zoho_{pd.Timestamp.now().timestamp()}")
 
     if not texte_note:
-        return {"status": "error", "message": "Note vide"}
+        return {"status": "error", "message": "Note vide ou JSON invalide"}
 
     print(f"\n📩 Note reçue de Zoho pour : {client_name}")
 
@@ -83,12 +91,15 @@ async def recevoir_note_zoho(request: Request):
 # 2. Endpoint : Interroger le RAG
 @app.post("/query-rag")
 async def query_rag(request: Request):
-    payload = await request.json()
+    payload = await get_json_payload(request)
     question = payload.get("question", "")
     n_results = payload.get("n_results", 3)
 
     if not question:
-        return {"status": "error", "message": "Question vide"}
+        return {
+            "status": "error",
+            "message": "Question vide. Assure-toi de fournir un corps JSON.",
+        }
 
     results = collection.query(query_texts=[question], n_results=n_results)
 
@@ -111,7 +122,7 @@ async def query_rag(request: Request):
 # 3. Endpoint : Modifier une note
 @app.post("/update-note")
 async def modifier_note(request: Request):
-    payload = await request.json()
+    payload = await get_json_payload(request)
     note_id = payload.get("note_id")
     nouveau_texte = payload.get("note")
     client_name = payload.get("client", "Client Inconnu")
@@ -122,7 +133,7 @@ async def modifier_note(request: Request):
             "message": "Les champs 'note_id' et 'note' sont requis",
         }
 
-    # Mise à jour dans ChromaDB
+    # ChromaDB
     collection.update(
         ids=[str(note_id)],
         documents=[nouveau_texte],
@@ -131,7 +142,7 @@ async def modifier_note(request: Request):
         ],
     )
 
-    # Mise à jour dans SQLite
+    # SQLite
     conn = sqlite3.connect("analytics_crm.db")
     cursor = conn.cursor()
     cursor.execute(
@@ -151,16 +162,16 @@ async def modifier_note(request: Request):
 # 4. Endpoint : Supprimer une note
 @app.post("/delete-note")
 async def effacer_note(request: Request):
-    payload = await request.json()
+    payload = await get_json_payload(request)
     note_id = payload.get("note_id")
 
     if not note_id:
         return {"status": "error", "message": "Le champ 'note_id' est requis"}
 
-    # Suppression dans ChromaDB
+    # ChromaDB
     collection.delete(ids=[str(note_id)])
 
-    # Suppression dans SQLite
+    # SQLite
     conn = sqlite3.connect("analytics_crm.db")
     cursor = conn.cursor()
     cursor.execute("DELETE FROM incidents WHERE id = ?", (str(note_id),))
