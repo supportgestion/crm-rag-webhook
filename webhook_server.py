@@ -4,6 +4,8 @@ import sqlite3
 import chromadb
 from chromadb.utils import embedding_functions
 from fastapi import FastAPI, Request
+from pydantic import BaseModel
+from typing import Optional
 import pandas as pd
 
 app = FastAPI(title="Zoho CRM to RAG Webhook")
@@ -17,35 +19,34 @@ collection = chroma_client.get_or_create_collection(
 )
 
 
-# Helper sécurisé pour extraire le JSON
-async def get_json_payload(request: Request):
-    try:
-        return await request.json()
-    except Exception:
-        return {}
+# Modèles de données pour Swagger (Affiche les champs d'écriture)
+class QueryModel(BaseModel):
+    question: str
+    n_results: Optional[int] = 3
 
 
-# 1. Endpoint : Ingestion depuis Zoho CRM
+class NoteModel(BaseModel):
+    note_id: Optional[str] = None
+    client: Optional[str] = "Client Inconnu"
+    note: str
+    date: Optional[str] = "2026-08-10"
+
+
+class DeleteModel(BaseModel):
+    note_id: str
+
+
+# 1. Ingestion depuis Zoho CRM
 @app.post("/zoho-webhook")
-async def recevoir_note_zoho(request: Request):
-    payload = await get_json_payload(request)
+async def recevoir_note_zoho(data: NoteModel):
+    note_id = data.note_id or f"zoho_{pd.Timestamp.now().timestamp()}"
 
-    client_name = payload.get("client", "Client Inconnu")
-    date_note = payload.get("date", "2026-08-10")
-    texte_note = payload.get("note", "")
-    note_id = payload.get("note_id", f"zoho_{pd.Timestamp.now().timestamp()}")
+    if not data.note:
+        return {"status": "error", "message": "Note vide"}
 
-    if not texte_note:
-        return {"status": "error", "message": "Note vide ou JSON invalide"}
+    print(f"\n📩 Note reçue de Zoho pour : {data.client}")
 
-    print(f"\n📩 Note reçue de Zoho pour : {client_name}")
-
-    data = {
-        "categorie": "Général",
-        "resume_probleme": texte_note[:100] + "..."
-        if len(texte_note) > 100
-        else texte_note,
-    }
+    resume = data.note[:100] + "..." if len(data.note) > 100 else data.note
 
     # SQLite
     conn = sqlite3.connect("analytics_crm.db")
@@ -66,21 +67,15 @@ async def recevoir_note_zoho(request: Request):
         INSERT OR REPLACE INTO incidents (id, client, date_note, categorie, resume_probleme)
         VALUES (?, ?, ?, ?, ?)
     """,
-        (
-            str(note_id),
-            client_name,
-            str(date_note),
-            data["categorie"],
-            data["resume_probleme"],
-        ),
+        (str(note_id), data.client, str(data.date), "Général", resume),
     )
     conn.commit()
     conn.close()
 
     # ChromaDB
     collection.add(
-        documents=[texte_note],
-        metadatas=[{"client": client_name, "date": str(date_note)}],
+        documents=[data.note],
+        metadatas=[{"client": data.client, "date": str(data.date)}],
         ids=[str(note_id)],
     )
 
@@ -88,20 +83,13 @@ async def recevoir_note_zoho(request: Request):
     return {"status": "success"}
 
 
-# 2. Endpoint : Interroger le RAG
+# 2. Interroger le RAG
 @app.post("/query-rag")
-async def query_rag(request: Request):
-    payload = await get_json_payload(request)
-    question = payload.get("question", "")
-    n_results = payload.get("n_results", 3)
+async def query_rag(data: QueryModel):
+    if not data.question:
+        return {"status": "error", "message": "Question vide"}
 
-    if not question:
-        return {
-            "status": "error",
-            "message": "Question vide. Assure-toi de fournir un corps JSON.",
-        }
-
-    results = collection.query(query_texts=[question], n_results=n_results)
+    results = collection.query(query_texts=[data.question], n_results=data.n_results)
 
     retrieved_docs = results.get("documents", [[]])[0]
     retrieved_metadatas = results.get("metadatas", [[]])[0]
@@ -109,7 +97,7 @@ async def query_rag(request: Request):
 
     return {
         "status": "success",
-        "question": question,
+        "question": data.question,
         "results": [
             {"id": doc_id, "doc": doc, "metadata": meta}
             for doc_id, doc, meta in zip(
@@ -119,67 +107,39 @@ async def query_rag(request: Request):
     }
 
 
-# 3. Endpoint : Modifier une note
+# 3. Modifier une note
 @app.post("/update-note")
-async def modifier_note(request: Request):
-    payload = await get_json_payload(request)
-    note_id = payload.get("note_id")
-    nouveau_texte = payload.get("note")
-    client_name = payload.get("client", "Client Inconnu")
+async def modifier_note(data: NoteModel):
+    if not data.note_id or not data.note:
+        return {"status": "error", "message": "note_id et note sont requis"}
 
-    if not note_id or not nouveau_texte:
-        return {
-            "status": "error",
-            "message": "Les champs 'note_id' et 'note' sont requis",
-        }
-
-    # ChromaDB
     collection.update(
-        ids=[str(note_id)],
-        documents=[nouveau_texte],
-        metadatas=[
-            {"client": client_name, "date": str(pd.Timestamp.now().date())}
-        ],
+        ids=[str(data.note_id)],
+        documents=[data.note],
+        metadatas=[{"client": data.client, "date": str(pd.Timestamp.now().date())}],
     )
 
-    # SQLite
     conn = sqlite3.connect("analytics_crm.db")
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE incidents SET resume_probleme = ? WHERE id = ?",
-        (nouveau_texte[:100], str(note_id)),
+        (data.note[:100], str(data.note_id)),
     )
     conn.commit()
     conn.close()
 
-    print(f"✏️ Note {note_id} mise à jour.")
-    return {
-        "status": "success",
-        "message": f"Note {note_id} mise à jour avec succès.",
-    }
+    return {"status": "success", "message": f"Note {data.note_id} mise à jour"}
 
 
-# 4. Endpoint : Supprimer une note
+# 4. Supprimer une note
 @app.post("/delete-note")
-async def effacer_note(request: Request):
-    payload = await get_json_payload(request)
-    note_id = payload.get("note_id")
+async def effacer_note(data: DeleteModel):
+    collection.delete(ids=[str(data.note_id)])
 
-    if not note_id:
-        return {"status": "error", "message": "Le champ 'note_id' est requis"}
-
-    # ChromaDB
-    collection.delete(ids=[str(note_id)])
-
-    # SQLite
     conn = sqlite3.connect("analytics_crm.db")
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM incidents WHERE id = ?", (str(note_id),))
+    cursor.execute("DELETE FROM incidents WHERE id = ?", (str(data.note_id),))
     conn.commit()
     conn.close()
 
-    print(f"🗑️ Note {note_id} supprimée.")
-    return {
-        "status": "success",
-        "message": f"Note {note_id} supprimée avec succès.",
-    }
+    return {"status": "success", "message": f"Note {data.note_id} supprimée"}
