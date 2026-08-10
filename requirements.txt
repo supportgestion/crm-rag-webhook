@@ -1,8 +1,6 @@
---extra-index-url https://download.pytorch.org/whl/cpu
 fastapi
 uvicorn
 pydantic
 chromadb
-sentence-transformers
-torch
 pandas
+requests
