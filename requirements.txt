@@ -1,6 +1,7 @@
 fastapi
 uvicorn
-pydantic
 chromadb
 pandas
 requests
+pydantic
+huggingface_hub
