@@ -2,58 +2,19 @@ import json
 import os
 import sqlite3
 import chromadb
-from chromadb import EmbeddingFunction, Documents, Embeddings
+from chromadb.utils import embedding_functions
 from fastapi import FastAPI, Request
 import pandas as pd
-import requests
 
 app = FastAPI(title="Zoho CRM to RAG Webhook")
 
-# API Hugging Face via le Router HF
-HF_TOKEN = os.getenv("HF_TOKEN")
-API_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# Utilisation de la fonction d'embedding par défaut / ONNX ultra-léger de ChromaDB
+# (Ne charge aucun gros modèle en RAM et évite les erreurs HTTP 400 HF)
+default_ef = embedding_functions.DefaultEmbeddingFunction()
 
-
-class HFEmbeddingFunction(EmbeddingFunction):
-
-    def __call__(self, input: Documents) -> Embeddings:
-        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-
-        # Formatage des inputs pour l'API Hugging Face
-        payload_input = input if len(input) > 1 else input[0]
-
-        response = requests.post(
-            API_URL,
-            headers=headers,
-            json={
-                "inputs": payload_input,
-                "options": {"wait_for_model": True},
-            },
-            timeout=30,
-        )
-
-        if response.status_code != 200:
-            print(f"❌ HF Error {response.status_code}: {response.text}")
-            response.raise_for_status()
-
-        res = response.json()
-
-        # Formatage strict requis par ChromaDB : List[List[float]]
-        if isinstance(res, list):
-            if len(res) > 0 and isinstance(res[0], float):
-                return [res]
-            return res
-
-        return [res]
-
-    def name(self) -> str:
-        return "hf_multilingual_minilm"
-
-
-# Initialisation ChromaDB
 chroma_client = chromadb.PersistentClient(path="./rag_db")
 collection = chroma_client.get_or_create_collection(
-    name="crm_notes", embedding_function=HFEmbeddingFunction()
+    name="crm_notes", embedding_function=default_ef
 )
 
 
