@@ -8,8 +8,7 @@ import pandas as pd
 
 app = FastAPI(title="Zoho CRM to RAG Webhook")
 
-# Utilisation de la fonction d'embedding par défaut / ONNX ultra-léger de ChromaDB
-# (Ne charge aucun gros modèle en RAM et évite les erreurs HTTP 400 HF)
+# Utilisation de l'embedding ONNX ultra-léger de ChromaDB
 default_ef = embedding_functions.DefaultEmbeddingFunction()
 
 chroma_client = chromadb.PersistentClient(path="./rag_db")
@@ -18,7 +17,7 @@ collection = chroma_client.get_or_create_collection(
 )
 
 
-# Endpoint Webhook pour Zoho CRM
+# 1. Endpoint Webhook d'ingestion depuis Zoho CRM
 @app.post("/zoho-webhook")
 async def recevoir_note_zoho(request: Request):
     payload = await request.json()
@@ -33,7 +32,6 @@ async def recevoir_note_zoho(request: Request):
 
     print(f"\n📩 Note reçue de Zoho pour : {client_name}")
 
-    # Résumé / Catégorisation
     data = {
         "categorie": "Général",
         "resume_probleme": texte_note[:100] + "..."
@@ -74,3 +72,29 @@ async def recevoir_note_zoho(request: Request):
 
     print("✅ Note Zoho synchronisée dans le RAG et SQLite !")
     return {"status": "success"}
+
+
+# 2. Nouvel Endpoint pour interroger le RAG (Search & Query)
+@app.post("/query-rag")
+async def query_rag(request: Request):
+    payload = await request.json()
+    question = payload.get("question", "")
+    n_results = payload.get("n_results", 3)
+
+    if not question:
+        return {"status": "error", "message": "Question vide"}
+
+    # Recherche vectorielle dans ChromaDB
+    results = collection.query(query_texts=[question], n_results=n_results)
+
+    retrieved_docs = results.get("documents", [[]])[0]
+    retrieved_metadatas = results.get("metadatas", [[]])[0]
+
+    return {
+        "status": "success",
+        "question": question,
+        "results": [
+            {"doc": doc, "metadata": meta}
+            for doc, meta in zip(retrieved_docs, retrieved_metadatas)
+        ],
+    }
