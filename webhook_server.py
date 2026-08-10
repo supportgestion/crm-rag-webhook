@@ -119,7 +119,7 @@ async def query_rag(data: QueryModel):
     }
 
 
-# 3. Chatbot intelligent (Mistral 7B via Hugging Face Free Tier)
+# 3. Chatbot intelligent (Mistral 7B via Hugging Face Chat Completion)
 @app.post("/chat-rag")
 async def chat_rag(data: ChatModel):
     if not data.question:
@@ -153,8 +153,7 @@ Consignes de sécurité :
 3. N'invente aucune donnée.
 
 Contexte CRM :
-{contexte}
-"""
+{contexte}"""
 
     if not HF_TOKEN:
         return {
@@ -164,16 +163,23 @@ Contexte CRM :
 
     try:
         client_hf = InferenceClient(model=MODEL_ID, token=HF_TOKEN)
-        prompt_complet = f"<s>[INST] {system_prompt}\n\nQuestion : {data.question} [/INST]"
 
-        completion = client_hf.text_generation(
-            prompt_complet, max_new_tokens=300, temperature=0.1
+        # Appel au format Chat Completion
+        response = client_hf.chat_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": data.question},
+            ],
+            max_tokens=300,
+            temperature=0.1,
         )
+
+        reponse_ia = response.choices[0].message.content
 
         return {
             "status": "success",
             "question": data.question,
-            "reponse": completion.strip(),
+            "reponse": reponse_ia,
             "sources": [
                 {"doc": doc, "metadata": meta}
                 for doc, meta in zip(retrieved_docs, retrieved_metadatas)
