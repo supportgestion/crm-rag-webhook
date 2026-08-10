@@ -9,7 +9,7 @@ import requests
 
 app = FastAPI(title="Zoho CRM to RAG Webhook")
 
-# API Hugging Face (Acheminement via le nouveau Router HF)
+# API Hugging Face via le Router HF
 HF_TOKEN = os.getenv("HF_TOKEN")
 API_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
@@ -18,31 +18,46 @@ class HFEmbeddingFunction(EmbeddingFunction):
 
     def __call__(self, input: Documents) -> Embeddings:
         headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+
+        # Formatage des inputs pour l'API Hugging Face
+        payload_input = input if len(input) > 1 else input[0]
+
         response = requests.post(
             API_URL,
             headers=headers,
-            json={"inputs": input, "options": {"wait_for_model": True}},
+            json={
+                "inputs": payload_input,
+                "options": {"wait_for_model": True},
+            },
             timeout=30,
         )
-        response.raise_for_status()
+
+        if response.status_code != 200:
+            print(f"❌ HF Error {response.status_code}: {response.text}")
+            response.raise_for_status()
+
         res = response.json()
 
-        # Formatage de sécurité pour ChromaDB
-        if isinstance(res, list) and len(res) > 0 and isinstance(res[0], float):
-            return [res]
-        return res
+        # Formatage strict requis par ChromaDB : List[List[float]]
+        if isinstance(res, list):
+            if len(res) > 0 and isinstance(res[0], float):
+                return [res]
+            return res
+
+        return [res]
 
     def name(self) -> str:
         return "hf_multilingual_minilm"
 
 
+# Initialisation ChromaDB
 chroma_client = chromadb.PersistentClient(path="./rag_db")
 collection = chroma_client.get_or_create_collection(
     name="crm_notes", embedding_function=HFEmbeddingFunction()
 )
 
 
-# Endpoint Webhook pour Zoho
+# Endpoint Webhook pour Zoho CRM
 @app.post("/zoho-webhook")
 async def recevoir_note_zoho(request: Request):
     payload = await request.json()
@@ -57,7 +72,7 @@ async def recevoir_note_zoho(request: Request):
 
     print(f"\n📩 Note reçue de Zoho pour : {client_name}")
 
-    # Catégorisation
+    # Résumé / Catégorisation
     data = {
         "categorie": "Général",
         "resume_probleme": texte_note[:100] + "..."
@@ -65,7 +80,7 @@ async def recevoir_note_zoho(request: Request):
         else texte_note,
     }
 
-    # SQL
+    # Stockage SQLite
     conn = sqlite3.connect("analytics_crm.db")
     cursor = conn.cursor()
     cursor.execute(
@@ -89,7 +104,7 @@ async def recevoir_note_zoho(request: Request):
     conn.commit()
     conn.close()
 
-    # ChromaDB
+    # Indexation Vectorielle ChromaDB
     collection.add(
         documents=[texte_note],
         metadatas=[{"client": client_name, "date": str(date_note)}],
