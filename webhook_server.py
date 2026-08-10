@@ -9,9 +9,9 @@ import requests
 
 app = FastAPI(title="Zoho CRM to RAG Webhook")
 
-# API Hugging Face pour l'embedding (Consomme 0 Mo de RAM localement)
+# API Hugging Face (Acheminement via le nouveau Router HF)
 HF_TOKEN = os.getenv("HF_TOKEN")
-API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+API_URL = "https://router.huggingface.co/hf-inference/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 
 class HFEmbeddingFunction(EmbeddingFunction):
@@ -22,8 +22,15 @@ class HFEmbeddingFunction(EmbeddingFunction):
             API_URL,
             headers=headers,
             json={"inputs": input, "options": {"wait_for_model": True}},
+            timeout=30,
         )
-        return response.json()
+        response.raise_for_status()
+        res = response.json()
+
+        # Formatage de sécurité pour ChromaDB
+        if isinstance(res, list) and len(res) > 0 and isinstance(res[0], float):
+            return [res]
+        return res
 
     def name(self) -> str:
         return "hf_multilingual_minilm"
@@ -50,7 +57,7 @@ async def recevoir_note_zoho(request: Request):
 
     print(f"\n📩 Note reçue de Zoho pour : {client_name}")
 
-    # Catégorisation simplifiée sans Ollama local
+    # Catégorisation
     data = {
         "categorie": "Général",
         "resume_probleme": texte_note[:100] + "..."
