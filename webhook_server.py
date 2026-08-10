@@ -8,7 +8,7 @@ import pandas as pd
 
 app = FastAPI(title="Zoho CRM to RAG Webhook")
 
-# Utilisation de l'embedding ONNX ultra-léger de ChromaDB
+# Embedding ONNX ultra-léger de ChromaDB
 default_ef = embedding_functions.DefaultEmbeddingFunction()
 
 chroma_client = chromadb.PersistentClient(path="./rag_db")
@@ -17,7 +17,7 @@ collection = chroma_client.get_or_create_collection(
 )
 
 
-# 1. Endpoint Webhook d'ingestion depuis Zoho CRM
+# 1. Endpoint : Ingestion depuis Zoho CRM
 @app.post("/zoho-webhook")
 async def recevoir_note_zoho(request: Request):
     payload = await request.json()
@@ -39,13 +39,13 @@ async def recevoir_note_zoho(request: Request):
         else texte_note,
     }
 
-    # Stockage SQLite
+    # SQLite
     conn = sqlite3.connect("analytics_crm.db")
     cursor = conn.cursor()
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS incidents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT PRIMARY KEY,
             client TEXT,
             date_note TEXT,
             categorie TEXT,
@@ -55,15 +55,21 @@ async def recevoir_note_zoho(request: Request):
     )
     cursor.execute(
         """
-        INSERT INTO incidents (client, date_note, categorie, resume_probleme)
-        VALUES (?, ?, ?, ?)
+        INSERT OR REPLACE INTO incidents (id, client, date_note, categorie, resume_probleme)
+        VALUES (?, ?, ?, ?, ?)
     """,
-        (client_name, str(date_note), data["categorie"], data["resume_probleme"]),
+        (
+            str(note_id),
+            client_name,
+            str(date_note),
+            data["categorie"],
+            data["resume_probleme"],
+        ),
     )
     conn.commit()
     conn.close()
 
-    # Indexation Vectorielle ChromaDB
+    # ChromaDB
     collection.add(
         documents=[texte_note],
         metadatas=[{"client": client_name, "date": str(date_note)}],
@@ -74,7 +80,7 @@ async def recevoir_note_zoho(request: Request):
     return {"status": "success"}
 
 
-# 2. Nouvel Endpoint pour interroger le RAG (Search & Query)
+# 2. Endpoint : Interroger le RAG
 @app.post("/query-rag")
 async def query_rag(request: Request):
     payload = await request.json()
@@ -84,17 +90,85 @@ async def query_rag(request: Request):
     if not question:
         return {"status": "error", "message": "Question vide"}
 
-    # Recherche vectorielle dans ChromaDB
     results = collection.query(query_texts=[question], n_results=n_results)
 
     retrieved_docs = results.get("documents", [[]])[0]
     retrieved_metadatas = results.get("metadatas", [[]])[0]
+    retrieved_ids = results.get("ids", [[]])[0]
 
     return {
         "status": "success",
         "question": question,
         "results": [
-            {"doc": doc, "metadata": meta}
-            for doc, meta in zip(retrieved_docs, retrieved_metadatas)
+            {"id": doc_id, "doc": doc, "metadata": meta}
+            for doc_id, doc, meta in zip(
+                retrieved_ids, retrieved_docs, retrieved_metadatas
+            )
         ],
+    }
+
+
+# 3. Endpoint : Modifier une note
+@app.post("/update-note")
+async def modifier_note(request: Request):
+    payload = await request.json()
+    note_id = payload.get("note_id")
+    nouveau_texte = payload.get("note")
+    client_name = payload.get("client", "Client Inconnu")
+
+    if not note_id or not nouveau_texte:
+        return {
+            "status": "error",
+            "message": "Les champs 'note_id' et 'note' sont requis",
+        }
+
+    # Mise à jour dans ChromaDB
+    collection.update(
+        ids=[str(note_id)],
+        documents=[nouveau_texte],
+        metadatas=[
+            {"client": client_name, "date": str(pd.Timestamp.now().date())}
+        ],
+    )
+
+    # Mise à jour dans SQLite
+    conn = sqlite3.connect("analytics_crm.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE incidents SET resume_probleme = ? WHERE id = ?",
+        (nouveau_texte[:100], str(note_id)),
+    )
+    conn.commit()
+    conn.close()
+
+    print(f"✏️ Note {note_id} mise à jour.")
+    return {
+        "status": "success",
+        "message": f"Note {note_id} mise à jour avec succès.",
+    }
+
+
+# 4. Endpoint : Supprimer une note
+@app.post("/delete-note")
+async def effacer_note(request: Request):
+    payload = await request.json()
+    note_id = payload.get("note_id")
+
+    if not note_id:
+        return {"status": "error", "message": "Le champ 'note_id' est requis"}
+
+    # Suppression dans ChromaDB
+    collection.delete(ids=[str(note_id)])
+
+    # Suppression dans SQLite
+    conn = sqlite3.connect("analytics_crm.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM incidents WHERE id = ?", (str(note_id),))
+    conn.commit()
+    conn.close()
+
+    print(f"🗑️ Note {note_id} supprimée.")
+    return {
+        "status": "success",
+        "message": f"Note {note_id} supprimée avec succès.",
     }
