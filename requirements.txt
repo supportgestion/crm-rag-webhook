@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-chromadb
 pandas
 requests
 pydantic
@@ -8,4 +7,3 @@ huggingface_hub
 streamlit
 pinecone
 supabase
-sentence-transformers
