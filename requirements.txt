@@ -1,9 +1,14 @@
 fastapi
-uvicorn
-pandas
+uvicorn[standard]
 requests
 pydantic
 huggingface_hub
-streamlit
 pinecone
 supabase
+
+# pandas et streamlit retires : inutiles dans le backend, ils alourdissent
+# l'image et le temps de demarrage.
+#
+# Des que le deploiement fonctionne, epingle les versions pour ne plus
+# subir de casse silencieuse a la prochaine mise en ligne :
+#   pip freeze > requirements.txt
