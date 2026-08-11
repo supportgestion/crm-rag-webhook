@@ -26,12 +26,29 @@ index = pc.Index("crm-notes")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-# --- FONCTION D'EMBEDDING VIA API (LÉGÈRE) ---
+# --- FONCTION D'EMBEDDING VIA API (SÉCURISÉE) ---
 def get_embedding(text: str):
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     api_url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{EMBEDDING_MODEL}"
-    response = requests.post(api_url, headers=headers, json={"inputs": text})
-    return response.json()
+    
+    try:
+        response = requests.post(api_url, headers=headers, json={"inputs": text})
+        
+        # Si l'API Hugging Face n'est pas prête (Code 503) ou bug
+        if response.status_code != 200:
+            print(f"Erreur HF: {response.text}") # S'affichera dans les logs Render
+            return None
+            
+        result = response.json()
+        
+        # Sécurité : Si HF renvoie une liste 2D [[0.1, 0.2...]], on extrait la liste 1D
+        if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
+            return result[0]
+            
+        return result
+    except Exception as e:
+        print(f"Erreur de connexion HF: {str(e)}")
+        return None
 
 
 # --- 3. MODÈLES DE DONNÉES ---
@@ -56,24 +73,33 @@ async def recevoir_note_zoho(data: NoteModel):
     resume = data.note[:100] + "..." if len(data.note) > 100 else data.note
 
     # 1. Sauvegarde dans Supabase (SQL)
-    supabase.table("incidents").upsert({
-        "id": str(note_id),
-        "client": data.client,
-        "date_note": str(data.date),
-        "categorie": "Général",
-        "resume_probleme": resume
-    }).execute()
+    try:
+        supabase.table("incidents").upsert({
+            "id": str(note_id),
+            "client": data.client,
+            "date_note": str(data.date),
+            "categorie": "Général",
+            "resume_probleme": resume
+        }).execute()
+    except Exception as e:
+        print(f"Erreur Supabase: {str(e)}")
 
     # 2. Vectorisation et sauvegarde dans Pinecone via API
     vector = get_embedding(data.note)
     if isinstance(vector, list):
-        index.upsert(
-            vectors=[{
-                "id": str(note_id),
-                "values": vector,
-                "metadata": {"client": data.client, "date": str(data.date), "texte": data.note}
-            }]
-        )
+        try:
+            index.upsert(
+                vectors=[{
+                    "id": str(note_id),
+                    "values": vector,
+                    "metadata": {"client": data.client, "date": str(data.date), "texte": data.note}
+                }]
+            )
+        except Exception as e:
+            print(f"Erreur Pinecone: {str(e)}")
+            return {"status": "error", "message": "Erreur interne Pinecone"}
+    else:
+        return {"status": "error", "message": "L'API Hugging Face n'a pas pu créer le vecteur (modèle en cours de réveil)."}
     
     return {"status": "success", "message": "Note synchronisée dans le Cloud"}
 
@@ -85,19 +111,32 @@ async def chat_rag(data: ChatModel):
 
     # 1. Transformer la question en vecteur via API
     question_vector = get_embedding(data.question)
+    
+    # Nouvelle sécurité : Si le vecteur a échoué (ex: HF est en train de charger)
     if not isinstance(question_vector, list):
-        return {"status": "error", "message": "Erreur lors de la vectorisation de la question"}
+        return {
+            "status": "success", 
+            "question": data.question,
+            "reponse": "L'IA est en cours de réveil. Veuillez patienter 20 secondes et reposer votre question.",
+            "sources": []
+        }
 
     # 2. Chercher dans Pinecone
-    search_results = index.query(
-        vector=question_vector,
-        top_k=data.n_results,
-        include_metadata=True
-    )
+    try:
+        search_results = index.query(
+            vector=question_vector,
+            top_k=data.n_results,
+            include_metadata=True
+        )
+    except Exception as e:
+        print(f"Erreur Pinecone Query: {str(e)}")
+        return {"status": "error", "message": "Erreur lors de la recherche dans Pinecone."}
 
     matches = search_results.get("matches", [])
     if not matches:
         return {
+            "status": "success",
+            "question": data.question,
             "reponse": "Information non disponible dans la base de données CRM.",
             "sources": []
         }
@@ -144,4 +183,10 @@ Question : {data.question}"""
         }
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        print(f"Erreur LLM HF: {str(e)}")
+        return {
+            "status": "success",
+            "question": data.question,
+            "reponse": "L'IA est en cours de réveil ou saturée. Veuillez patienter 20 secondes et reposer votre question.",
+            "sources": []
+        }
