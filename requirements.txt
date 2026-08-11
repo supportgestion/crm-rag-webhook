@@ -6,3 +6,6 @@ requests
 pydantic
 huggingface_hub
 streamlit
+pinecone-client
+supabase
+sentence-transformers
