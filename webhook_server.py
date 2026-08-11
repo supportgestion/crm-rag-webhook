@@ -3,12 +3,12 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional
 import pandas as pd
+import requests
 from huggingface_hub import InferenceClient
 from pinecone import Pinecone
 from supabase import create_client, Client
-from sentence_transformers import SentenceTransformer
 
-app = FastAPI(title="Zoho CRM to RAG Webhook (Cloud Edition)")
+app = FastAPI(title="Zoho CRM to RAG Webhook (Cloud Lightweight Edition)")
 
 # --- 1. CONFIGURATION DES CLÉS API ---
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
@@ -17,17 +17,21 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 MODEL_ID = "Qwen/Qwen2.5-Coder-7B-Instruct"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # --- 2. INITIALISATION DES CLIENTS CLOUD ---
-# Pinecone (Vecteurs)
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index("crm-notes")
 
-# Supabase (SQL)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Modèle d'embedding (384 dimensions, parfait pour le français)
-embedder = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+
+# --- FONCTION D'EMBEDDING VIA API (LÉGÈRE) ---
+def get_embedding(text: str):
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    api_url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{EMBEDDING_MODEL}"
+    response = requests.post(api_url, headers=headers, json={"inputs": text})
+    return response.json()
 
 
 # --- 3. MODÈLES DE DONNÉES ---
@@ -60,15 +64,16 @@ async def recevoir_note_zoho(data: NoteModel):
         "resume_probleme": resume
     }).execute()
 
-    # 2. Sauvegarde dans Pinecone (Vecteurs)
-    vector = embedder.encode(data.note).tolist()
-    index.upsert(
-        vectors=[{
-            "id": str(note_id),
-            "values": vector,
-            "metadata": {"client": data.client, "date": str(data.date), "texte": data.note}
-        }]
-    )
+    # 2. Vectorisation et sauvegarde dans Pinecone via API
+    vector = get_embedding(data.note)
+    if isinstance(vector, list):
+        index.upsert(
+            vectors=[{
+                "id": str(note_id),
+                "values": vector,
+                "metadata": {"client": data.client, "date": str(data.date), "texte": data.note}
+            }]
+        )
     
     return {"status": "success", "message": "Note synchronisée dans le Cloud"}
 
@@ -78,8 +83,10 @@ async def chat_rag(data: ChatModel):
     if not data.question:
         return {"status": "error", "message": "Question vide"}
 
-    # 1. Transformer la question en vecteur
-    question_vector = embedder.encode(data.question).tolist()
+    # 1. Transformer la question en vecteur via API
+    question_vector = get_embedding(data.question)
+    if not isinstance(question_vector, list):
+        return {"status": "error", "message": "Erreur lors de la vectorisation de la question"}
 
     # 2. Chercher dans Pinecone
     search_results = index.query(
