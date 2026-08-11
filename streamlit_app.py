@@ -7,8 +7,8 @@ st.set_page_config(page_title="Assistant CRM", page_icon="🤖", layout="centere
 st.title("🤖 Chatbot CRM - Base de connaissances")
 st.markdown("Posez vos questions sur l'historique des clients ou les incidents récents.")
 
-# L'URL de ton API Render (le cerveau du chatbot)
-API_URL = "https://crm-rag-webhook.onrender.com/chat-rag"
+# L'URL de ton API Railway (le nouveau serveur opérationnel)
+API_URL = "https://crm-rag-webhook-production.up.railway.app/chat-rag"
 
 # Initialisation de l'historique de chat façon Gemini
 if "messages" not in st.session_state:
@@ -27,7 +27,7 @@ if prompt := st.chat_input("Ex: Quel est le problème de Jihad ZAKHOUR ?"):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 2. Interroger ton serveur Render
+    # 2. Interroger ton serveur Railway
     with st.chat_message("assistant"):
         with st.spinner("Recherche dans les notes du CRM..."):
             try:
@@ -59,4 +59,4 @@ if prompt := st.chat_input("Ex: Quel est le problème de Jihad ZAKHOUR ?"):
                     st.error(f"Le serveur CRM est indisponible (Code {response.status_code}). Attendez quelques secondes qu'il se réveille.")
                     
             except Exception as e:
-                st.error("Impossible de se connecter au serveur Render. Vérifiez que l'API est en ligne.")
+                st.error("Impossible de se connecter au serveur Railway. Vérifiez que l'API est en ligne.")
