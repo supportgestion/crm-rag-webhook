@@ -23,8 +23,7 @@ collection = chroma_client.get_or_create_collection(
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
 # Modèle souverain Mistral-7B via Hugging Face Inference API
-MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"
-
+MODEL_ID = "Qwen/Qwen2.5-Coder-7B-Instruct"
 
 # Modèles Pydantic
 class QueryModel(BaseModel):
