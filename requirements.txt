@@ -5,3 +5,4 @@ pandas
 requests
 pydantic
 huggingface_hub
+streamlit
