@@ -6,7 +6,8 @@ Principes de ce fichier :
      cle est manquante. Le port est binde, et /health dit ce qui ne va pas.
   2. Les erreurs remontent en vrais codes HTTP (502 / 503), jamais deguisees
      en "success". Un echec doit etre visible immediatement.
-  3. Une seule source de verite pour la config, verifiee au demarrage.
+  3. Tous les reglages sont pilotables par variable d'environnement, pour
+     ajuster sans redeployer le code.
 """
 
 import os
@@ -31,18 +32,23 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 PINECONE_INDEX = os.environ.get("PINECONE_INDEX", "crm-notes")
 
-# Modele multilingue : indispensable, tes notes et tes questions sont en francais.
-# Dimension 384 -> compatible avec ton index Pinecone existant.
-# ATTENTION : si tu as deja indexe des notes avec all-MiniLM-L6-v2 (anglais),
-# il faut les revectoriser, sinon les resultats seront incoherents.
+# Modele multilingue : indispensable, les notes et les questions sont en francais.
+# Dimension 384 -> compatible avec l'index Pinecone existant.
 EMBEDDING_MODEL = os.environ.get(
     "EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 )
 
-# Modele de generation. Qwen2.5-Coder est specialise code : mauvais choix pour
-# rediger en francais. Verifie la disponibilite du modele choisi sur
-# https://huggingface.co/docs/inference-providers avant de deployer.
 MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen2.5-7B-Instruct")
+
+# Seuil de similarite cosinus en dessous duquel une note est jugee hors sujet.
+# Mesure sur ce modele : une correspondance pertinente tourne autour de 0.20,
+# nettement plus bas que sur les modeles anglophones. D'ou 0.15 par defaut.
+# A reajuster quand la base contiendra plus de notes.
+try:
+    MIN_SCORE_DEFAULT = float(os.environ.get("MIN_SCORE", "0.15"))
+except ValueError:
+    log.warning("MIN_SCORE illisible, repli sur 0.15")
+    MIN_SCORE_DEFAULT = 0.15
 
 # L'ancien hote api-inference.huggingface.co est mort (DNS supprime).
 # Format actuel : router.huggingface.co/hf-inference/models/{model}/pipeline/{task}
@@ -146,8 +152,10 @@ class NoteModel(BaseModel):
 class ChatModel(BaseModel):
     question: str
     n_results: Optional[int] = 3
-    client: Optional[str] = None       # filtre optionnel sur un client precis
-    min_score: Optional[float] = 0.30  # seuil anti-hallucination (cosine)
+    client: Optional[str] = None   # filtre optionnel sur un client precis
+    # None = utiliser MIN_SCORE_DEFAULT. Passer 0 explicitement desactive le
+    # filtre, ce qui est pratique pour diagnostiquer un "aucune source trouvee".
+    min_score: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +178,7 @@ def health():
         "embedding_model": EMBEDDING_MODEL,
         "llm_model": MODEL_ID,
         "pinecone_index": PINECONE_INDEX,
+        "min_score": MIN_SCORE_DEFAULT,
     }
 
 
@@ -193,8 +202,58 @@ def debug_embedding(text: str = "test de vectorisation"):
     return {"dimension": len(vec), "apercu": vec[:5]}
 
 
+@app.get("/debug/search")
+def debug_search(question: str, n_results: int = 5):
+    """Montre les scores bruts de Pinecone sans aucun filtrage ni appel au LLM.
+    C'est l'outil pour calibrer MIN_SCORE : lance quelques questions typiques et
+    compare les scores des notes pertinentes a ceux des notes hors sujet."""
+    res = get_index().query(
+        vector=get_embedding(question), top_k=n_results, include_metadata=True
+    )
+    matches = _extract_matches(res)
+    return {
+        "min_score_actuel": MIN_SCORE_DEFAULT,
+        "resultats": [
+            {
+                "score": getattr(m, "score", None),
+                "retenu": (getattr(m, "score", 0) or 0) >= MIN_SCORE_DEFAULT,
+                "client": (_extract_meta(m) or {}).get("client"),
+                "extrait": ((_extract_meta(m) or {}).get("texte") or "")[:120],
+            }
+            for m in matches
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
-# 6. INGESTION
+# 6. HELPERS PINECONE
+# ---------------------------------------------------------------------------
+# Le SDK Pinecone renvoie des objets, pas des dicts, et la forme a change entre
+# les versions majeures. On gere les deux plutot que de supposer une version.
+
+def _extract_matches(res):
+    matches = getattr(res, "matches", None)
+    if matches is None:
+        matches = res["matches"] if isinstance(res, dict) else []
+    return matches or []
+
+
+def _extract_meta(match):
+    meta = getattr(match, "metadata", None)
+    if meta is None and isinstance(match, dict):
+        meta = match.get("metadata")
+    return meta or {}
+
+
+def _extract_score(match):
+    score = getattr(match, "score", None)
+    if score is None and isinstance(match, dict):
+        score = match.get("score")
+    return score
+
+
+# ---------------------------------------------------------------------------
+# 7. INGESTION
 # ---------------------------------------------------------------------------
 
 @app.post("/zoho-webhook")
@@ -211,6 +270,8 @@ def recevoir_note_zoho(data: NoteModel):
 
     # Pinecone d'abord : si la vectorisation echoue, on ne veut PAS d'une ligne
     # SQL orpheline qui laisse croire que la note est interrogeable.
+    # Le texte COMPLET part dans les metadonnees Pinecone, c'est lui qui sert au
+    # RAG. Supabase ne stocke qu'un resume, pour le reporting.
     vector = get_embedding(note)
     try:
         get_index().upsert(
@@ -250,7 +311,7 @@ def recevoir_note_zoho(data: NoteModel):
 
 
 # ---------------------------------------------------------------------------
-# 7. RAG
+# 8. RAG
 # ---------------------------------------------------------------------------
 
 @app.post("/chat-rag")
@@ -258,6 +319,8 @@ def chat_rag(data: ChatModel):
     question = (data.question or "").strip()
     if not question:
         raise HTTPException(400, "Question vide")
+
+    seuil = MIN_SCORE_DEFAULT if data.min_score is None else data.min_score
 
     question_vector = get_embedding(question)
 
@@ -277,40 +340,30 @@ def chat_rag(data: ChatModel):
         log.error("Pinecone query: %s", e)
         raise HTTPException(502, f"Recherche Pinecone impossible : {e}")
 
-    # Le SDK Pinecone renvoie un objet, pas un dict : on gere les deux formes
-    # plutot que de supposer une version precise du client.
-    matches = getattr(res, "matches", None)
-    if matches is None:
-        matches = res["matches"] if isinstance(res, dict) else []
-
     # Seuil de similarite : sans ca, Pinecone renvoie toujours les top_k plus
     # proches, meme s'ils n'ont aucun rapport avec la question. C'est la
     # premiere cause d'hallucination dans un RAG.
     retenus = []
-    for m in matches:
-        score = getattr(m, "score", None)
-        if score is None and isinstance(m, dict):
-            score = m.get("score")
-        if score is None or score >= (data.min_score or 0):
+    for m in _extract_matches(res):
+        score = _extract_score(m)
+        if score is None or score >= seuil:
             retenus.append(m)
 
     if not retenus:
+        log.info("Aucune source au-dessus de %s pour: %s", seuil, question)
         return {"status": "success", "question": question,
                 "reponse": NO_INFO, "sources": []}
 
     contexte_elements, sources = [], []
     for m in retenus:
-        meta = getattr(m, "metadata", None)
-        if meta is None:
-            meta = m.get("metadata", {}) if isinstance(m, dict) else {}
-        meta = meta or {}
+        meta = _extract_meta(m)
         client = meta.get("client", "Inconnu")
         date = meta.get("date", "")
         texte = meta.get("texte", "")
         contexte_elements.append(f"[Client: {client} | Date: {date}]\nNote: {texte}")
         sources.append({
             "doc": texte,
-            "score": getattr(m, "score", None),
+            "score": _extract_score(m),
             "metadata": {"client": client, "date": date},
         })
 
