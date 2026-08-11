@@ -1,151 +1,115 @@
-import json
 import os
-import sqlite3
-import chromadb
-from chromadb.utils import embedding_functions
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional
 import pandas as pd
 from huggingface_hub import InferenceClient
+from pinecone import Pinecone
+from supabase import create_client, Client
+from sentence_transformers import SentenceTransformer
 
-app = FastAPI(title="Zoho CRM to RAG Webhook with Hugging Face")
+app = FastAPI(title="Zoho CRM to RAG Webhook (Cloud Edition)")
 
-# Embedding ONNX local ultra-léger
-default_ef = embedding_functions.DefaultEmbeddingFunction()
-
-chroma_client = chromadb.PersistentClient(path="./rag_db")
-collection = chroma_client.get_or_create_collection(
-    name="crm_notes", embedding_function=default_ef
-)
-
-# Token Hugging Face récupéré depuis l'environnement Render
+# --- 1. CONFIGURATION DES CLÉS API ---
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
+PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-# Modèle compatible Hugging Face Inference API Serverless
 MODEL_ID = "Qwen/Qwen2.5-Coder-7B-Instruct"
 
+# --- 2. INITIALISATION DES CLIENTS CLOUD ---
+# Pinecone (Vecteurs)
+pc = Pinecone(api_key=PINECONE_API_KEY)
+index = pc.Index("crm-notes")
 
-# Modèles Pydantic
-class QueryModel(BaseModel):
-    question: str
-    n_results: Optional[int] = 3
+# Supabase (SQL)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Modèle d'embedding (384 dimensions, parfait pour le français)
+embedder = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
 
 
+# --- 3. MODÈLES DE DONNÉES ---
 class ChatModel(BaseModel):
     question: str
     n_results: Optional[int] = 3
-
 
 class NoteModel(BaseModel):
     note_id: Optional[str] = None
     client: Optional[str] = "Client Inconnu"
     note: str
-    date: Optional[str] = "2026-08-10"
+    date: Optional[str] = "2026-08-11"
 
 
-class DeleteModel(BaseModel):
-    note_id: str
-
-
-# 1. Ingestion Zoho CRM
+# --- 4. ENDPOINTS ---
 @app.post("/zoho-webhook")
 async def recevoir_note_zoho(data: NoteModel):
     note_id = data.note_id or f"zoho_{pd.Timestamp.now().timestamp()}"
-
     if not data.note:
         return {"status": "error", "message": "Note vide"}
 
-    print(f"\n📩 Note reçue de Zoho pour : {data.client}")
-
     resume = data.note[:100] + "..." if len(data.note) > 100 else data.note
 
-    # SQLite
-    conn = sqlite3.connect("analytics_crm.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS incidents (
-            id TEXT PRIMARY KEY,
-            client TEXT,
-            date_note TEXT,
-            categorie TEXT,
-            resume_probleme TEXT
-        )
-    """
+    # 1. Sauvegarde dans Supabase (SQL)
+    supabase.table("incidents").upsert({
+        "id": str(note_id),
+        "client": data.client,
+        "date_note": str(data.date),
+        "categorie": "Général",
+        "resume_probleme": resume
+    }).execute()
+
+    # 2. Sauvegarde dans Pinecone (Vecteurs)
+    vector = embedder.encode(data.note).tolist()
+    index.upsert(
+        vectors=[{
+            "id": str(note_id),
+            "values": vector,
+            "metadata": {"client": data.client, "date": str(data.date), "texte": data.note}
+        }]
     )
-    cursor.execute(
-        """
-        INSERT OR REPLACE INTO incidents (id, client, date_note, categorie, resume_probleme)
-        VALUES (?, ?, ?, ?, ?)
-    """,
-        (str(note_id), data.client, str(data.date), "Général", resume),
-    )
-    conn.commit()
-    conn.close()
-
-    # ChromaDB
-    collection.add(
-        documents=[data.note],
-        metadatas=[{"client": data.client, "date": str(data.date)}],
-        ids=[str(note_id)],
-    )
-
-    print("✅ Note Zoho synchronisée dans le RAG et SQLite !")
-    return {"status": "success"}
+    
+    return {"status": "success", "message": "Note synchronisée dans le Cloud"}
 
 
-# 2. Recherche vectorielle brute (Search RAG)
-@app.post("/query-rag")
-async def query_rag(data: QueryModel):
-    if not data.question:
-        return {"status": "error", "message": "Question vide"}
-
-    results = collection.query(query_texts=[data.question], n_results=data.n_results)
-
-    retrieved_docs = results.get("documents", [[]])[0]
-    retrieved_metadatas = results.get("metadatas", [[]])[0]
-    retrieved_ids = results.get("ids", [[]])[0]
-
-    return {
-        "status": "success",
-        "question": data.question,
-        "results": [
-            {"id": doc_id, "doc": doc, "metadata": meta}
-            for doc_id, doc, meta in zip(
-                retrieved_ids, retrieved_docs, retrieved_metadatas
-            )
-        ],
-    }
-
-
-# 3. Chatbot intelligent (Qwen 2.5 via Hugging Face Chat Completion)
 @app.post("/chat-rag")
 async def chat_rag(data: ChatModel):
     if not data.question:
         return {"status": "error", "message": "Question vide"}
 
-    # Recherche dans ChromaDB
-    results = collection.query(query_texts=[data.question], n_results=data.n_results)
-    retrieved_docs = results.get("documents", [[]])[0]
-    retrieved_metadatas = results.get("metadatas", [[]])[0]
+    # 1. Transformer la question en vecteur
+    question_vector = embedder.encode(data.question).tolist()
 
-    if not retrieved_docs:
+    # 2. Chercher dans Pinecone
+    search_results = index.query(
+        vector=question_vector,
+        top_k=data.n_results,
+        include_metadata=True
+    )
+
+    matches = search_results.get("matches", [])
+    if not matches:
         return {
             "reponse": "Information non disponible dans la base de données CRM.",
-            "sources": [],
+            "sources": []
         }
 
-    # Formatage du contexte
+    # 3. Formater le contexte
     contexte_elements = []
-    for doc, meta in zip(retrieved_docs, retrieved_metadatas):
+    sources = []
+    for match in matches:
+        meta = match.get("metadata", {})
         client = meta.get("client", "Inconnu")
         date = meta.get("date", "")
-        contexte_elements.append(f"[Client: {client} | Date: {date}]\nNote: {doc}")
+        texte = meta.get("texte", "")
+        
+        contexte_elements.append(f"[Client: {client} | Date: {date}]\nNote: {texte}")
+        sources.append({"doc": texte, "metadata": {"client": client, "date": date}})
 
     contexte = "\n\n---\n\n".join(contexte_elements)
 
-    # Prompt regroupé dans le message 'user' pour une meilleure prise en compte
+    # 4. Interroger l'IA Hugging Face
     user_prompt = f"""Tu es un assistant B2B factuel.
 
 Consignes strictes :
@@ -157,70 +121,20 @@ Notes CRM disponibles :
 
 Question : {data.question}"""
 
-    if not HF_TOKEN:
-        return {
-            "status": "error",
-            "message": "Variable HF_TOKEN non configurée sur Render.",
-        }
-
     try:
         client_hf = InferenceClient(model=MODEL_ID, token=HF_TOKEN)
-
         response = client_hf.chat_completion(
             messages=[{"role": "user", "content": user_prompt}],
             max_tokens=300,
             temperature=0.1,
         )
 
-        reponse_ia = response.choices[0].message.content
-
         return {
             "status": "success",
             "question": data.question,
-            "reponse": reponse_ia,
-            "sources": [
-                {"doc": doc, "metadata": meta}
-                for doc, meta in zip(retrieved_docs, retrieved_metadatas)
-            ],
+            "reponse": response.choices[0].message.content,
+            "sources": sources
         }
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
-
-# 4. Modifier une note
-@app.post("/update-note")
-async def modifier_note(data: NoteModel):
-    if not data.note_id or not data.note:
-        return {"status": "error", "message": "note_id et note requis"}
-
-    collection.update(
-        ids=[str(data.note_id)],
-        documents=[data.note],
-        metadatas=[{"client": data.client, "date": str(pd.Timestamp.now().date())}],
-    )
-
-    conn = sqlite3.connect("analytics_crm.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE incidents SET resume_probleme = ? WHERE id = ?",
-        (data.note[:100], str(data.note_id)),
-    )
-    conn.commit()
-    conn.close()
-
-    return {"status": "success", "message": f"Note {data.note_id} mise à jour"}
-
-
-# 5. Supprimer une note
-@app.post("/delete-note")
-async def effacer_note(data: DeleteModel):
-    collection.delete(ids=[str(data.note_id)])
-
-    conn = sqlite3.connect("analytics_conn.db")
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM incidents WHERE id = ?", (str(data.note_id),))
-    conn.commit()
-    conn.close()
-
-    return {"status": "success", "message": f"Note {data.note_id} supprimée"}
