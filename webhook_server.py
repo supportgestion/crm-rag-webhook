@@ -22,8 +22,9 @@ collection = chroma_client.get_or_create_collection(
 # Token Hugging Face récupéré depuis l'environnement Render
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
-# Modèle souverain Mistral-7B via Hugging Face Inference API
+# Modèle compatible Hugging Face Inference API Serverless
 MODEL_ID = "Qwen/Qwen2.5-Coder-7B-Instruct"
+
 
 # Modèles Pydantic
 class QueryModel(BaseModel):
@@ -118,7 +119,7 @@ async def query_rag(data: QueryModel):
     }
 
 
-# 3. Chatbot intelligent (Mistral 7B via Hugging Face Chat Completion)
+# 3. Chatbot intelligent (Qwen 2.5 via Hugging Face Chat Completion)
 @app.post("/chat-rag")
 async def chat_rag(data: ChatModel):
     if not data.question:
@@ -144,15 +145,17 @@ async def chat_rag(data: ChatModel):
 
     contexte = "\n\n---\n\n".join(contexte_elements)
 
-    # Prompt d'ancrage strict anti-hallucination
-    system_prompt = f"""Tu es un assistant B2B factuel pour l'entreprise.
-Consignes de sécurité :
-1. Réponds à la question uniquement avec les notes CRM fournies ci-dessous.
-2. Si l'information n'est pas dans le texte, réponds STRICTEMENT : "Information non disponible dans la base de données CRM."
-3. N'invente aucune donnée.
+    # Prompt regroupé dans le message 'user' pour une meilleure prise en compte
+    user_prompt = f"""Tu es un assistant B2B factuel.
 
-Contexte CRM :
-{contexte}"""
+Consignes strictes :
+1. Réponds à la question en t'appuyant uniquement sur les notes CRM ci-dessous.
+2. N'invente aucune donnée. Si l'information est absente, réponds exactement : "Information non disponible dans la base de données CRM."
+
+Notes CRM disponibles :
+{contexte}
+
+Question : {data.question}"""
 
     if not HF_TOKEN:
         return {
@@ -163,12 +166,8 @@ Contexte CRM :
     try:
         client_hf = InferenceClient(model=MODEL_ID, token=HF_TOKEN)
 
-        # Appel au format Chat Completion
         response = client_hf.chat_completion(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": data.question},
-            ],
+            messages=[{"role": "user", "content": user_prompt}],
             max_tokens=300,
             temperature=0.1,
         )
@@ -218,7 +217,7 @@ async def modifier_note(data: NoteModel):
 async def effacer_note(data: DeleteModel):
     collection.delete(ids=[str(data.note_id)])
 
-    conn = sqlite3.connect("analytics_crm.db")
+    conn = sqlite3.connect("analytics_conn.db")
     cursor = conn.cursor()
     cursor.execute("DELETE FROM incidents WHERE id = ?", (str(data.note_id),))
     conn.commit()
