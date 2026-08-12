@@ -376,16 +376,30 @@ def reformuler(question: str, entites: Dict[str, Any]) -> str:
         contexte += f"\nContacts concernes : {', '.join(entites['contacts'])}"
 
     system = (
-        "Tu reformules une question pour une recherche documentaire. "
-        "Tu produis UNE seule ligne de mots-cles et synonymes metier, sans "
-        "ponctuation superflue, sans phrase d'introduction, sans explication. "
-        "Tu conserves tous les noms propres et ajoutes ceux du contexte fourni."
+        "Tu reformules une question pour une recherche documentaire dans un CRM "
+        "de logiciel de gestion pour la restauration. "
+        "Tu produis UNE seule ligne de mots-cles, EXCLUSIVEMENT EN FRANCAIS, "
+        "sans ponctuation superflue, sans introduction, sans explication. "
+        "Tu conserves tous les noms propres et ajoutes ceux du contexte fourni. "
+        "Tu n'ajoutes QUE des synonymes des mots deja presents dans la question. "
+        "Tu n'INVENTES JAMAIS de theme absent de la question : pas d'hygiene, "
+        "pas de securite alimentaire, pas de ressources humaines, pas de "
+        "reclamation client, si la question n'en parle pas. "
+        "Domaine reel des notes : facturation, import de donnees, caisse, "
+        "produits, fournisseurs, recettes, marges, droits d'acces, parametrage, "
+        "formation."
     )
     user = f"Question : {question}{contexte}\n\nLigne de mots-cles enrichie :"
 
     try:
         sortie = appeler_llm(system, user, max_tokens=120).strip()
         sortie = sortie.split("\n")[0].strip(' "')
+        # Le LLM part parfois en chinois ou en anglais malgre la consigne. Des
+        # caracteres non latins polluent l'embedding : on coupe la sortie a leur
+        # premiere apparition plutot que de tout jeter.
+        coupe = re.search(r"[^\x00-\x7F\u00C0-\u017F\s]", sortie)
+        if coupe:
+            sortie = sortie[:coupe.start()].strip()
         if 3 < len(sortie) < 400:
             return f"{question} {sortie}"
     except Exception as e:
