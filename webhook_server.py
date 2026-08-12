@@ -755,13 +755,22 @@ def chat_rag(data: ChatModel):
         f"{r.get('texte','')}" for r in trouves
     )
 
+    # Une consigne de refus trop stricte bloque des reponses legitimes : aucune
+    # phrase d'une note ne dit litteralement "le probleme de X est...", donc le
+    # LLM concluait qu'il ne pouvait pas repondre. On lui dit explicitement que
+    # SYNTHETISER est attendu, et on reserve NO_INFO au vrai hors-sujet.
     system = (
         "Tu es un assistant CRM factuel pour le suivi client B2B. "
-        "Tu reponds exclusivement a partir des notes fournies, sans aucune "
-        "connaissance externe et sans jamais extrapoler. "
-        f'Si les notes ne contiennent pas la reponse, tu ecris exactement : "{NO_INFO}" '
-        "Un contact et son entreprise designent la meme situation : une question "
-        "sur une personne concerne les notes de son entreprise. "
+        "Tu reponds a partir des notes fournies, sans connaissance externe. "
+        "SYNTHETISER plusieurs elements d'une note est une reponse valide et "
+        "attendue : si la question porte sur les problemes d'un client, tu "
+        "listes tous les problemes, difficultes, points a traiter et actions "
+        "en attente que tu trouves dans les notes. "
+        "Un contact et son entreprise designent la meme situation : une "
+        "question sur une personne concerne les notes de son entreprise. "
+        f'Tu n\'ecris "{NO_INFO}" QUE si les notes ne parlent pas du tout du '
+        "sujet demande. Ne l'ecris jamais quand les notes contiennent des "
+        "elements de reponse, meme partiels. "
         "Tu cites le client et la date des notes utilisees. Tu reponds en francais."
     )
     user = f"Notes CRM :\n\n{contexte}\n\nQuestion : {question}"
