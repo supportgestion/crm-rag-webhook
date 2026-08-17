@@ -21,6 +21,10 @@ Trois mecanismes assurent le rappel (retrouver une info qui existe bien) :
 Plus une REFORMULATION optionnelle : le LLM enrichit la question de synonymes
 metier avant la recherche. Cout ~2-3 s, gain de rappel important sur les
 formulations familieres. Desactivable via REFORMULER=false.
+
+Les noms de clients sont normalises par clients.py (table canonique partagee
+avec import_notes.py) : le webhook Zoho envoie le nom du CONTACT, la table le
+rattache a sa societe.
 """
 
 import os
@@ -33,6 +37,8 @@ from typing import Optional, List, Dict, Any, Tuple
 import requests
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
+
+from clients import resoudre_client, CLIENT_INCONNU
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("crm-rag")
@@ -514,6 +520,7 @@ def recherche_hybride(
 class NoteModel(BaseModel):
     note_id: Optional[str] = None
     client: Optional[str] = None
+    contact: Optional[str] = None       # nom de la personne, envoye par Zoho
     note: str
     date: Optional[str] = None
     titre: Optional[str] = None
@@ -566,6 +573,20 @@ def debug_pinecone():
 def debug_embedding(text: str = "test de vectorisation"):
     vec = get_embedding(text)
     return {"dimension": len(vec), "apercu": vec[:5]}
+
+
+@app.get("/debug/client")
+def debug_client(nom: str):
+    """Verifie ce que la table canonique renvoie pour un nom donne.
+
+    Sert a tester un alias de contact SANS creer de note : si le resultat est
+    identique au nom envoye, l'entree manque dans clients.py."""
+    resolu = resoudre_client(nom)
+    return {
+        "envoye": nom,
+        "resolu": resolu,
+        "dans_la_table": bool(resolu) and resolu != nom.strip(),
+    }
 
 
 @app.get("/debug/entites")
@@ -667,8 +688,15 @@ def recevoir_note_zoho(data: NoteModel):
             log.error("Extraction echouee: %s", e.detail)
             extrait = {"_erreur": str(e.detail)}
 
-    client = data.client or extrait.get("client") or "Client Inconnu"
-    contact = extrait.get("contact") or ""
+    # Zoho envoie le nom du CONTACT dans "client" (le champ societe n'est pas
+    # disponible sur un declencheur Remarques). clients.py rattache ce nom a sa
+    # societe ; un nom hors table est conserve tel quel avec un warning.
+    client = (resoudre_client(data.client)
+              or resoudre_client(extrait.get("client"))
+              or CLIENT_INCONNU)
+    # Le champ Zoho passe devant l'extraction : donnee fiable contre donnee
+    # deduite par le LLM.
+    contact = data.contact or extrait.get("contact") or ""
 
     # --- Pinecone : un vecteur par morceau, entete enrichie ---
     entete = construire_entete(client, contact, titre, date_note)
