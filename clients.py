@@ -66,17 +66,32 @@ CLIENTS_CANONIQUES = {
     "marine_lesage": "Support Gestion+ (Marine Lesage)",
 
     # -----------------------------------------------------------------------
-    # ALIAS CONTACT -> SOCIETE
+    # ID DE SOCIETE ZOHO -> NOM AFFICHE
     # -----------------------------------------------------------------------
-    # Le webhook Zoho envoie le nom du CONTACT dans le champ "client".
-    # Chaque interlocuteur doit figurer ici, sinon son nom apparaitra tel quel
-    # dans /stats/clients (avec un warning dans les logs Railway).
+    # Le champ ${Contacts.Nom du Entreprises} est un lookup : Zoho transmet
+    # l'ID de l'enregistrement lie, pas son libelle. On mappe donc l'ID.
     #
-    # A COMPLETER — remplacer par les vraies societes :
-    # "jihad_zakhour": "???",
-    # "leo_berthault": "???",
+    # Avantage sur un alias par personne : UN ID PAR SOCIETE. Tous les
+    # contacts d'un meme client tombent sur la meme entree, sans risque de
+    # faute de frappe puisque l'ID ne varie jamais.
     #
-    # Exemple de la forme attendue :
+    # Pour relever un nouvel ID : il apparait dans /stats/clients a la place
+    # du nom, ou dans l'URL de la fiche societe (module Enseignes).
+    # Toujours commenter la ligne avec le nom, sinon la table est illisible.
+    "397482000031823972": "SARL CHEZ LE LIBANAIS",   # contact : Jihad ZAKHOUR
+
+    # -----------------------------------------------------------------------
+    # ALIAS CONTACT -> SOCIETE  (repli)
+    # -----------------------------------------------------------------------
+    # Quand le champ societe est vide dans Zoho (cas des prospects), le nom de
+    # la personne arrive dans "client". Ces notes sont indexees sous ce nom,
+    # avec un warning "hors table canonique" dans les logs Railway.
+    #
+    # Ne remplir ici QUE si l'on veut rattacher un contact sans passer par
+    # Zoho. La solution propre reste de renseigner "Nom du Entreprises" sur la
+    # fiche du contact : l'ID sera transmis et une seule entree suffira.
+    #
+    # Forme attendue :
     # "robin_bassin": "The Bouillon Of Paris",
 }
 
